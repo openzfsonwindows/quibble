@@ -2571,6 +2571,69 @@ dnode_read(const spa_t *spa, const dnode_phys_t *dnode, off_t offset,
 }
 
 /*
+ * OpenZFS on Windows: case insensitive datasets.
+ *
+ * A dataset with casesensitivity=insensitive keeps its directories in ZAPs
+ * with U8_TEXTPREP_TOUPPER in their normalization flags. ZFS hashes the name
+ * after upper-casing it, and compares the entries upper-cased too, while
+ * storing them as they were created. FreeBSD's reader does neither: it hashes
+ * and compares the name exactly as it is given, so in a large directory (a fat
+ * ZAP, where the hash decides which leaf to look in) nothing is found.
+ *
+ * Windows needs case insensitive lookups whatever the dataset, as the registry
+ * and the loader refer to System32 and system32 alike.
+ *
+ * Only ASCII is folded: that is all that U8_TEXTPREP_TOUPPER and the Unicode
+ * normalization forms do to ASCII. A name with other letters in it (an
+ * accented one, say) will not be found in a case insensitive ZAP, as ZFS would
+ * have upper-cased those before hashing them.
+ */
+#define	ZAP_NORM_TOUPPER	0x2	/* U8_TEXTPREP_TOUPPER */
+
+static int
+zap_normalize_name(uint64_t normflags, const char *name, char *out,
+    size_t outlen)
+{
+	size_t i;
+
+	for (i = 0; name[i] != '\0'; i++) {
+		char c = name[i];
+
+		if (i + 1 >= outlen)
+			return (ENAMETOOLONG);
+
+		if ((normflags & ZAP_NORM_TOUPPER) && c >= 'a' && c <= 'z')
+			c -= 'a' - 'A';
+
+		out[i] = c;
+	}
+
+	out[i] = '\0';
+
+	return (0);
+}
+
+/* key has been through zap_normalize_name() if the ZAP wants that */
+static int
+zap_name_matches(uint64_t normflags, const char *stored, const char *key)
+{
+	size_t i;
+
+	for (i = 0; ; i++) {
+		char c = stored[i];
+
+		if ((normflags & ZAP_NORM_TOUPPER) && c >= 'a' && c <= 'z')
+			c -= 'a' - 'A';
+
+		if (c != key[i])
+			return (0);
+
+		if (c == '\0')
+			return (1);
+	}
+}
+
+/*
  * Lookup a value in a microzap directory.
  */
 static int
@@ -2578,7 +2641,16 @@ mzap_lookup(const mzap_phys_t *mz, size_t size, const char *name,
     uint64_t *value)
 {
 	const mzap_ent_phys_t *mze;
+	char nname[ZAP_MAXNAMELEN];
 	int chunks, i;
+
+	/* OpenZFS on Windows: case insensitive ZAPs, see zap_normalize_name() */
+	if (mz->mz_normflags & ZAP_NORM_TOUPPER) {
+		if (zap_normalize_name(mz->mz_normflags, name, nname,
+		    sizeof (nname)) != 0)
+			return (ENAMETOOLONG);
+		name = nname;
+	}
 
 	/*
 	 * Microzap objects use exactly one block. Read the whole
@@ -2587,7 +2659,7 @@ mzap_lookup(const mzap_phys_t *mz, size_t size, const char *name,
 	chunks = size / MZAP_ENT_LEN - 1;
 	for (i = 0; i < chunks; i++) {
 		mze = &mz->mz_chunk[i];
-		if (strcmp(mze->mze_name, name) == 0) {
+		if (zap_name_matches(mz->mz_normflags, mze->mze_name, name)) {
 			*value = mze->mze_value;
 			return (0);
 		}
@@ -2602,7 +2674,7 @@ mzap_lookup(const mzap_phys_t *mz, size_t size, const char *name,
  */
 static int
 fzap_name_equal(const zap_leaf_t *zl, const zap_leaf_chunk_t *zc,
-    const char *name)
+    const char *name, uint64_t normflags)
 {
 	size_t namelen;
 	const zap_leaf_chunk_t *nc;
@@ -2610,16 +2682,31 @@ fzap_name_equal(const zap_leaf_t *zl, const zap_leaf_chunk_t *zc,
 
 	namelen = zc->l_entry.le_name_numints;
 
+	/* the stored name includes its NUL */
+	if (namelen != strlen(name) + 1)
+		return (0);
+
 	nc = &ZAP_LEAF_CHUNK(zl, zc->l_entry.le_name_chunk);
 	p = name;
 	while (namelen > 0) {
-		size_t len;
+		size_t len, i;
 
 		len = namelen;
 		if (len > ZAP_LEAF_ARRAY_BYTES)
 			len = ZAP_LEAF_ARRAY_BYTES;
-		if (memcmp(p, nc->l_array.la_array, len))
-			return (0);
+
+		/* OpenZFS on Windows: case insensitive ZAPs, see above */
+		for (i = 0; i < len; i++) {
+			char c = nc->l_array.la_array[i];
+
+			if ((normflags & ZAP_NORM_TOUPPER) &&
+			    c >= 'a' && c <= 'z')
+				c -= 'a' - 'A';
+
+			if (c != p[i])
+				return (0);
+		}
+
 		p += len;
 		namelen -= len;
 		nc = &ZAP_LEAF_CHUNK(zl, nc->l_array.la_next);
@@ -2815,7 +2902,8 @@ zap_deref_leaf(fat_zap_t *zap, uint64_t h, zap_leaf_t **lp)
 
 static int
 zap_leaf_lookup(zap_leaf_t *zl, uint64_t hash, const char *name,
-    uint64_t integer_size, uint64_t num_integers, void *value)
+    uint64_t normflags, uint64_t integer_size, uint64_t num_integers,
+    void *value)
 {
 	int rc;
 	uint16_t *chunkp;
@@ -2839,7 +2927,7 @@ zap_leaf_lookup(zap_leaf_t *zl, uint64_t hash, const char *name,
 		if (le->le_hash != hash)
 			continue;
 		zc = &ZAP_LEAF_CHUNK(zl, chunk);
-		if (fzap_name_equal(zl, zc, name)) {
+		if (fzap_name_equal(zl, zc, name, normflags)) {
 			if (zc->l_entry.le_value_intlen > integer_size) {
 				rc = EINVAL;
 			} else {
@@ -2865,6 +2953,7 @@ fzap_lookup(const spa_t *spa, const dnode_phys_t *dnode, zap_phys_t *zh,
 	fat_zap_t z;
 	zap_leaf_t *zl;
 	uint64_t hash;
+	char nname[ZAP_MAXNAMELEN];
 	int rc;
 
 	if (zh->zap_magic != ZAP_MAGIC)
@@ -2872,6 +2961,17 @@ fzap_lookup(const spa_t *spa, const dnode_phys_t *dnode, zap_phys_t *zh,
 
 	if ((rc = fzap_check_size(integer_size, num_integers)) != 0) {
 		return (rc);
+	}
+
+	/*
+	 * OpenZFS on Windows: case insensitive ZAPs. The hash is of the
+	 * normalized name, so it has to be normalized before we get the hash.
+	 */
+	if (zh->zap_normflags & ZAP_NORM_TOUPPER) {
+		if (zap_normalize_name(zh->zap_normflags, name, nname,
+		    sizeof (nname)) != 0)
+			return (ENAMETOOLONG);
+		name = nname;
 	}
 
 	z.zap_block_shift = ilog2(bsize);
@@ -2884,7 +2984,8 @@ fzap_lookup(const spa_t *spa, const dnode_phys_t *dnode, zap_phys_t *zh,
 	if (rc != 0)
 		return (rc);
 
-	rc = zap_leaf_lookup(zl, hash, name, integer_size, num_integers, value);
+	rc = zap_leaf_lookup(zl, hash, name, zh->zap_normflags, integer_size,
+	    num_integers, value);
 
 	zap_leaf_free(zl);
 	return (rc);

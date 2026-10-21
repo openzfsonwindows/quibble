@@ -11,4 +11,6 @@
 #define __FBSDID(x)
 #define __BEGIN_DECLS
 #define __END_DECLS
+#ifndef __containerof
 #define __containerof(x, s, m) ((s *)((char *)(x) - offsetof(s, m)))
+#endif

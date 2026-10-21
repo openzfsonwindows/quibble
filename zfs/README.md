@@ -51,16 +51,21 @@ goes in the `drivers` directory next to `quibble.efi`.
   gives a hash that won't match, so blocks read as corrupt instead of being
   accepted).
 
+## Testing
+
+`test/zap_case_test.c` is a host test of the case insensitive lookups, with
+hand-made ZAPs. The command to build and run it is in the file. It can't tell
+whether the hashes agree with ZFS's own; only a pool made by ZFS can.
+
 ## Known problems
 
-* **Case-insensitive datasets are not supported by the reader**, and they must
-  be: Windows looks files up without regard to case. The reader hashes and
-  compares names exactly as it is given them, but a dataset with
-  `casesensitivity=insensitive` stores its directories with the hash of the
-  upper-cased name. Small directories happen to work if the case is exactly
-  right; large ones, like System32, do not. This needs fixing in
-  `zap_lookup()`, and in the comparisons in the micro ZAP, before Windows can be
-  loaded.
+* **Case-insensitive lookups only fold ASCII.** A dataset with
+  `casesensitivity=insensitive` hashes and matches directory entries after
+  upper-casing the name, and FreeBSD's reader didn't, so large directories like
+  System32 couldn't be searched. `zap_lookup()` and what it calls now do that
+  (see `zap_normalize_name()` in `src/engine/zfsimpl.c`), but only for ASCII: a
+  name with an accented letter, say, will not be found in such a dataset. It
+  is tested against hand-made ZAPs but not yet against a pool made by ZFS.
 * Only the first device of a pool is probed when the driver starts, so a pool
   of several devices that aren't all there yet will not work.
 * The timestamps in `EFI_FILE_INFO` are always zero, and `EFI_FILE_SYSTEM_INFO`
