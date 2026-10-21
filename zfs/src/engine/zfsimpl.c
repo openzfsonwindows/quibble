@@ -246,7 +246,14 @@ nvlist_check_features_for_read(nvlist_t *nvl)
 		found = 0;
 
 		for (i = 0; features_for_read[i] != NULL; i++) {
-			if (memcmp(nvp_name->nv_data, features_for_read[i],
+			/*
+			 * OpenZFS on Windows: compare the lengths too. This
+			 * used to compare nv_size bytes, which reads past a
+			 * shorter name and accepts a name that is a prefix of
+			 * a supported one.
+			 */
+			if (strlen(features_for_read[i]) == nvp_name->nv_size &&
+			    memcmp(nvp_name->nv_data, features_for_read[i],
 			    nvp_name->nv_size) == 0) {
 				found = 1;
 				break;

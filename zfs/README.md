@@ -65,7 +65,7 @@ whether the hashes agree with ZFS's own; only a pool made by ZFS can.
   System32 couldn't be searched. `zap_lookup()` and what it calls now do that
   (see `zap_normalize_name()` in `src/engine/zfsimpl.c`), but only for ASCII: a
   name with an accented letter, say, will not be found in such a dataset. It
-  is tested against hand-made ZAPs but not yet against a pool made by ZFS.
+  is tested against hand-made ZAPs and against a pool made by OpenZFS on Windows (see `test/native_read_test.c`: a 402 entry fat-ZAP directory and mixed-case lookups).
 * Only the first device of a pool is probed when the driver starts, so a pool
   of several devices that aren't all there yet will not work.
 * The timestamps in `EFI_FILE_INFO` are always zero, and `EFI_FILE_SYSTEM_INFO`
