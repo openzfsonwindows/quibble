@@ -396,6 +396,13 @@ int printf(const char* fmt, ...) {
     return ret;
 }
 
+/* the reader hook for directory dumps; there is no pager here */
+int pager_output(const char* s) {
+    zfs_print(s);
+
+    return 0;
+}
+
 int asprintf(char** strp, const char* fmt, ...) {
     va_list ap;
     int len;
