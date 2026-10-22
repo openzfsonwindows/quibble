@@ -424,3 +424,13 @@ int asprintf(char** strp, const char* fmt, ...) {
 
     return len;
 }
+
+/* not the C runtime's: that is an import from msvcrt.dll, which nothing resolves here */
+char* strchr(const char* s, int c) {
+    for (;; s++) {
+        if (*s == (char)c)
+            return (char*)s;
+        if (!*s)
+            return NULL;
+    }
+}

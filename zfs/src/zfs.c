@@ -74,10 +74,52 @@ static volume* volumes = NULL;
 
 #define CONTAINER(ptr, type, field) ((type*)((uint8_t*)(ptr) - offsetof(type, field)))
 
+#ifdef ZFS_TRACE
+static void trace(const char* fmt, ...);
+#endif
+
 void zfs_print(const char* s) {
+#ifdef ZFS_TRACE
+    /* what the reader says is on the console too, and long enough to read */
+    trace("%s", s);
+    bs->Stall(1500000);
+#endif
     if (info_proto)
         info_proto->Print(s);
 }
+
+/* ZFS_TRACE: breadcrumbs on the firmware console, for finding where it dies */
+#ifdef ZFS_TRACE
+#include <stdarg.h>
+int vsnprintf(char* buf, size_t size, const char* fmt, va_list ap);
+
+static void trace(const char* fmt, ...) {
+    char s[256];
+    CHAR16 w[300];
+    va_list ap;
+    UINTN i, j = 0;
+
+    va_start(ap, fmt);
+    vsnprintf(s, sizeof(s), fmt, ap);
+    va_end(ap);
+
+    for (i = 0; s[i] && j < 296; i++) {
+        if (s[i] == '\n')
+            w[j++] = '\r';
+        w[j++] = (CHAR16)(unsigned char)s[i];
+    }
+    w[j] = 0;
+
+    systable->ConOut->OutputString(systable->ConOut, w);
+}
+
+#define tracep(...) do { trace(__VA_ARGS__); bs->Stall(1500000); } while (0)
+#define tracef(...) do { trace(__VA_ARGS__); bs->Stall(400000); } while (0)
+#else
+#define tracef(...) ((void)0)
+#define trace(...) ((void)0)
+#define tracep(...) ((void)0)
+#endif
 
 static void print_error(const char* func, EFI_STATUS Status) {
     char s[200], *p;
@@ -381,6 +423,8 @@ static EFI_STATUS EFIAPI file_open(struct _EFI_FILE_HANDLE* File, struct _EFI_FI
 
     Status = new_handle(fh->vol, norm, &nfh);
 
+    tracef("open %s -> %llx\n", norm, (unsigned long long)Status);
+
     bs->FreePool(full);
 
     if (EFI_ERROR(Status))
@@ -472,6 +516,8 @@ static EFI_STATUS EFIAPI file_read(struct _EFI_FILE_HANDLE* File, UINTN* BufferS
         return read_dir(fh, BufferSize, Buffer);
 
     rc = zfse_read(fh->f, fh->pos, Buffer, *BufferSize, &got);
+    tracef("read %s @%llx +%llx -> rc %d got %llx\n", fh->path, (unsigned long long)fh->pos,
+           (unsigned long long)*BufferSize, rc, (unsigned long long)got);
     if (rc != 0)
         return errno_to_status(rc);
 
@@ -531,7 +577,6 @@ static EFI_STATUS EFIAPI file_get_info(struct _EFI_FILE_HANDLE* File, EFI_GUID* 
     file_handle* fh = CONTAINER(File, file_handle, proto);
     EFI_GUID guid = EFI_FILE_INFO_ID;
 
-    // FIXME - EFI_FILE_SYSTEM_INFO
 
     if (!memcmp(InformationType, &guid, sizeof(EFI_GUID))) {
         struct zfse_stat st;
@@ -549,7 +594,45 @@ static EFI_STATUS EFIAPI file_get_info(struct _EFI_FILE_HANDLE* File, EFI_GUID* 
         return EFI_SUCCESS;
     }
 
-    zfs_print("Unrecognized file info GUID.\n");
+    guid = (EFI_GUID)EFI_FILE_SYSTEM_INFO_ID;
+
+    if (!memcmp(InformationType, &guid, sizeof(EFI_GUID))) {
+        static const CHAR16 label[] = L"ZFS";
+        UINTN size = offsetof(EFI_FILE_SYSTEM_INFO, VolumeLabel) + sizeof(label);
+        EFI_FILE_SYSTEM_INFO* info = Buffer;
+
+        if (*BufferSize < size) {
+            *BufferSize = size;
+            return EFI_BUFFER_TOO_SMALL;
+        }
+
+        memset(info, 0, size);
+        info->Size = size;
+        info->ReadOnly = TRUE;
+        info->BlockSize = 4096;
+        memcpy(info->VolumeLabel, label, sizeof(label));
+        *BufferSize = size;
+
+        return EFI_SUCCESS;
+    }
+
+    guid = (EFI_GUID)EFI_FILE_SYSTEM_VOLUME_LABEL_ID;
+
+    if (!memcmp(InformationType, &guid, sizeof(EFI_GUID))) {
+        static const CHAR16 label[] = L"ZFS";
+
+        if (*BufferSize < sizeof(label)) {
+            *BufferSize = sizeof(label);
+            return EFI_BUFFER_TOO_SMALL;
+        }
+
+        memcpy(Buffer, label, sizeof(label));
+        *BufferSize = sizeof(label);
+
+        return EFI_SUCCESS;
+    }
+
+    trace("GetInfo: unknown GUID %08x\n", *(unsigned*)InformationType);
 
     return EFI_UNSUPPORTED;
 }
@@ -577,7 +660,11 @@ static EFI_STATUS EFIAPI open_volume(EFI_SIMPLE_FILE_SYSTEM_PROTOCOL* This, EFI_
     EFI_STATUS Status;
 
     if (!vol->mnt) {
-        int rc = zfse_mount(vol->pool, &vol->mnt);
+        int rc;
+
+        tracep("open_volume: mounting\n");
+        rc = zfse_mount(vol->pool, &vol->mnt);
+        tracep("mount rc %d\n", rc);
 
         if (rc != 0) {
             zfs_print("Could not mount the ZFS root file system.\n");
@@ -709,8 +796,10 @@ static EFI_STATUS EFIAPI drv_start(EFI_DRIVER_BINDING_PROTOCOL* This, EFI_HANDLE
 
     size = (block->Media->LastBlock + 1) * block->Media->BlockSize;
 
+    tracep("start %p size %llu\n",ControllerHandle, (unsigned long long)size);
     // is there a ZFS pool here?
     rc = zfse_probe(vol_read, size, vol, &vol->pool);
+    tracep("probe rc %d\n",rc);
     if (rc != 0) {
         bs->FreePool(vol);
         close_protocols(This, ControllerHandle, true);
@@ -785,9 +874,11 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* SystemTable
     systable = SystemTable;
     bs = SystemTable->BootServices;
 
+    tracep("zfs: efi_main\n");
     get_info_protocol(ImageHandle);
 
     rc = zfse_init();
+    tracep("zfs: init rc %d\n",rc);
     if (rc != 0) {
         zfs_print("Could not initialize the ZFS reader.\n");
         return EFI_OUT_OF_RESOURCES;

@@ -5,7 +5,7 @@ A read-only ZFS driver for UEFI, in the manner of [ntfs-uefi](../ntfs) and
 partitions that hold a ZFS pool, so that Quibble can load Windows from a ZFS
 dataset.
 
-**Status: experimental.** It builds, but it has not been run yet.
+**Status: experimental.** It has been run under VMware (UEFI): it finds a pool, mounts it and Quibble reads files from it, case-insensitively. It has not booted Windows yet.
 
 ## How it works
 
@@ -56,6 +56,12 @@ goes in the `drivers` directory next to `quibble.efi`.
 `test/zap_case_test.c` is a host test of the case insensitive lookups, with
 hand-made ZAPs. The command to build and run it is in the file. It can't tell
 whether the hashes agree with ZFS's own; only a pool made by ZFS can.
+
+## Debugging
+
+Build with `-DCMAKE_C_FLAGS=-DZFS_TRACE` to get progress lines on the firmware
+console (each device probed, the mount, every open and read, and what the
+reader complains about), held on screen long enough to read.
 
 ## Known problems
 

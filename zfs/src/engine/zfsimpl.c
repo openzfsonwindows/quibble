@@ -289,9 +289,27 @@ vdev_read_phys(vdev_t *vdev, const blkptr_t *bp, void *buf,
 	}
 
 	rc = vdev->v_phys_read(vdev, vdev->v_priv, offset, buf, psize);
+#ifdef ZFS_TRACE
+	if (rc != 0) {
+		printf("DIAG phys_read rc %d off %llx size %llx\n", rc,
+		    (unsigned long long)offset, (unsigned long long)psize);
+	}
+#endif
 	if (rc == 0) {
-		if (bp != NULL)
+		if (bp != NULL) {
 			rc = zio_checksum_verify(vdev->v_spa, bp, buf);
+#ifdef ZFS_TRACE
+			if (rc != 0) {
+				printf("DIAG cksum rc %d alg %d comp %d "
+				    "off %llx psize %llx lsize %llx\n", rc,
+				    (int)BP_GET_CHECKSUM(bp),
+				    (int)BP_GET_COMPRESS(bp),
+				    (unsigned long long)offset,
+				    (unsigned long long)psize,
+				    (unsigned long long)BP_GET_LSIZE(bp));
+			}
+#endif
+		}
 	}
 
 	return (rc);
@@ -2469,10 +2487,18 @@ zio_read_impl(const spa_t *spa, const blkptr_t *bp, void *buf, bool print)
 		else
 			error = vdev->v_read(vdev, bp, pbuf, offset, size);
 		if (error == 0) {
-			if (cpfunc != ZIO_COMPRESS_OFF)
+			if (cpfunc != ZIO_COMPRESS_OFF) {
 				error = zio_decompress_data(cpfunc, pbuf,
 				    BP_GET_PSIZE(bp), buf, BP_GET_LSIZE(bp));
-			else if (size != BP_GET_PSIZE(bp))
+#ifdef ZFS_TRACE
+				if (error != 0)
+					printf("DIAG decompress rc %d comp %d "
+					    "psize %llx lsize %llx\n", error,
+					    cpfunc, (unsigned long long)
+					    BP_GET_PSIZE(bp), (unsigned long long)
+					    BP_GET_LSIZE(bp));
+#endif
+			} else if (size != BP_GET_PSIZE(bp))
 				bcopy(pbuf, buf, BP_GET_PSIZE(bp));
 		} else if (print) {
 			printf("zio_read error: %d\n", error);
