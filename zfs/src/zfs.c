@@ -82,7 +82,7 @@ void zfs_print(const char* s) {
 #ifdef ZFS_TRACE
     /* what the reader says is on the console too, and long enough to read */
     trace("%s", s);
-    bs->Stall(1500000);
+    bs->Stall(500000);
 #endif
     if (info_proto)
         info_proto->Print(s);
